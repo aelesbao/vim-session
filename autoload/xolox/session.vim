@@ -14,18 +14,27 @@ let g:xolox#session#version = '1.6'
 " argument:
 
 function! xolox#session#save_session(commands, filename) " {{{2
-  call add(a:commands, '" ' . a:filename . ': Vim session script.')
+  let is_all_tabs = (&sessionoptions =~ '\<tabpages\>')
+  call add(a:commands, '" ' . a:filename . ': Vim session script' . (is_all_tabs ? '' : ' for a single tab') . '.')
   call add(a:commands, '" Created by session.vim ' . g:xolox#session#version . ' on ' . strftime('%d %B %Y at %H:%M:%S.'))
   call add(a:commands, '" Open this file in Vim and run :source % to restore your session.')
   call add(a:commands, '')
-  call add(a:commands, 'set guioptions=' . escape(&go, ' "\'))
-  call add(a:commands, 'silent! set guifont=' . escape(&gfn, ' "\'))
+  if is_all_tabs
+    call add(a:commands, 'set guioptions=' . escape(&go, ' "\'))
+    call add(a:commands, 'silent! set guifont=' . escape(&gfn, ' "\'))
+  else
+    call add(a:commands, 'silent! call xolox#session#restored_tabsession()')
+  endif
   call xolox#session#save_globals(a:commands)
-  call xolox#session#save_features(a:commands)
-  call xolox#session#save_colors(a:commands)
+  if is_all_tabs
+    call xolox#session#save_features(a:commands)
+    call xolox#session#save_colors(a:commands)
+  endif
   call xolox#session#save_qflist(a:commands)
   call xolox#session#save_state(a:commands)
-  call xolox#session#save_fullscreen(a:commands)
+  if is_all_tabs
+    call xolox#session#save_fullscreen(a:commands)
+  endif
   call add(a:commands, 'doautoall SessionLoadPost')
   call add(a:commands, 'unlet SessionLoad')
   call add(a:commands, '')
@@ -125,12 +134,29 @@ function! xolox#session#save_state(commands) " {{{2
     endif
     
     call xolox#session#save_special_windows(lines)
+
+    if &sessionoptions !~ '\<tabpages\>'
+      " Filter out buffers not visible in the tab page.
+      let tabpage_buffers = tabpagebuflist()
+      call filter(lines, 's:tabpage_filter(tabpage_buffers, v:val)')
+    endif
+
     call extend(a:commands, map(lines, 's:state_filter(v:val)'))
     return 1
   finally
     let &sessionoptions = ssop_save
     call delete(tempfile)
   endtry
+endfunction
+
+function! s:tabpage_filter(tabpage_buffers, line)
+  if a:line !~ '^badd +\d\+ '
+    return 1
+  endif
+
+  let buffer = matchstr(a:line, '^badd +\d\+ \zs.*')
+  let bufnr = bufnr('^' . buffer . '$')
+  return (index(a:tabpage_buffers, bufnr) != -1)
 endfunction
 
 function! s:state_filter(line)
@@ -233,6 +259,40 @@ function! s:nerdtree_persist()
   endif
 endfunction
 
+function! xolox#session#restored_tabsession()
+  " This flag is set by a saved tab-scoped session during sourcing.
+  let s:is_restored_tabsession = 1
+endfunction
+
+function! s:set_session_name(name)
+    if &sessionoptions =~ '\<tabpages\>' && ! exists('s:is_restored_tabsession')
+      unlet! s:tabsession_name
+      let s:session_name = a:name
+    else
+      unlet! s:is_restored_tabsession
+      unlet! s:session_name
+      let s:tabsession_name = a:name
+      let t:session_tabsession_name = a:name
+    endif
+endfunction
+
+function! xolox#session#is_tabsession()
+  return exists('t:session_tabsession_name') && exists('s:tabsession_name') && t:session_tabsession_name == s:tabsession_name
+endfunction
+
+function! xolox#session#session_name()
+  if xolox#session#is_tabsession()
+    " We're in the tab where the tab-scoped session was defined.
+    return s:tabsession_name
+  elseif exists('s:session_name')
+    " A global session was defined.
+    return s:session_name
+  else
+    " There's no session.
+    return ''
+  endif
+endfunction
+
 " Automatic commands to manage the default session. {{{1
 
 function! xolox#session#auto_load() " {{{2
@@ -267,9 +327,18 @@ function! xolox#session#auto_save() " {{{2
   if !v:dying && g:session_autosave != 'no'
     let name = s:get_name('', 1)
     if name != '' && exists('s:session_is_dirty')
-      let msg = "Do you want to save your editing session before quitting Vim?"
+      let msg = printf("Do you want to save your editing session%s (%s) before quitting Vim?", (xolox#session#is_tabsession() ? ' for this tab page' : ''), xolox#session#session_name())
       if s:prompt(msg, 'g:session_autosave')
-        call xolox#session#save_cmd(name, '')
+        if xolox#session#is_tabsession()
+          call xolox#session#PushTabSessionOptions()
+          try
+            call xolox#session#save_cmd(name, '')
+          finally
+            call xolox#session#PopTabSessionOptions()
+          endtry
+        else
+          call xolox#session#save_cmd(name, '')
+        endif
       endif
     endif
   endif
@@ -287,43 +356,49 @@ function! xolox#session#auto_unlock() " {{{2
   endwhile
 endfunction
 
-"function! xolox#session#auto_dirty_check() " {{{2
-  "" TODO Why execute this on every buffer change?! Instead execute it only when we want to know whether the session is dirty!
-  "" This function is called each time a BufEnter event fires to detect when
-  "" the current tab page (or the buffer list) is changed in some way. This
-  "" enables the plug-in to not bother with the auto-save dialog when the
-  "" session hasn't changed.
-  "if v:this_session == ''
-    "" Don't waste CPU time when no session is loaded.
-    "return
-  "elseif !exists('s:cached_layouts')
-    "let s:cached_layouts = {}
-  "else
-    "" Clear non-existing tab pages from s:cached_layouts.
-    "let last_tabpage = tabpagenr('$')
-    "call filter(s:cached_layouts, 'v:key <= last_tabpage')
-  "endif
-  "" Check the buffer list.
-  "let all_buffers = s:serialize_buffer_list()
-  "if all_buffers != get(s:cached_layouts, 0, '')
-    "let s:session_is_dirty = 1
-  "endif
-  "let s:cached_layouts[0] = all_buffers
-  "" Check the layout of the current tab page.
-  "let tabpagenr = tabpagenr()
-  "let keys = ['tabpage:' . tabpagenr]
-  "let buflist = tabpagebuflist()
-  "for winnr in range(1, winnr('$'))
-    "" Create a string that describes the state of the window {winnr}.
-    "call add(keys, printf('width:%i,height:%i,buffer:%i',
-          "\ winwidth(winnr), winheight(winnr), buflist[winnr - 1]))
-  "endfor
-  "let layout = join(keys, "\n")
-  "if layout != get(s:cached_layouts, tabpagenr, '')
-    "let s:session_is_dirty = 1
-  "endif
-  "let s:cached_layouts[tabpagenr] = layout
-"endfunction
+function! xolox#session#auto_dirty_check() " {{{2
+  " TODO Why execute this on every buffer change?! Instead execute it only when we want to know whether the session is dirty!
+  " This function is called each time a BufEnter event fires to detect when
+  " the current tab page (or the buffer list) is changed in some way. This
+  " enables the plug-in to not bother with the auto-save dialog when the
+  " session hasn't changed.
+  if v:this_session == ''
+    " Don't waste CPU time when no session is loaded.
+    return
+  elseif !exists('s:cached_layouts')
+    let s:cached_layouts = {}
+  else
+    " Clear non-existing tab pages from s:cached_layouts.
+    let last_tabpage = tabpagenr('$')
+    call filter(s:cached_layouts, 'v:key <= last_tabpage')
+  endif
+  " Check the buffer list.
+  let all_buffers = s:serialize_buffer_list()
+  if all_buffers != get(s:cached_layouts, 0, '')
+    let s:session_is_dirty = 1
+  endif
+  let s:cached_layouts[0] = all_buffers
+  " Check the layout of the current tab page.
+  if exists('s:tabsession_name') && (!exists('t:session_tabsession_name') || t:session_tabsession_name != s:tabsession_name)
+    " When only one tabpage is persisted, do the check only when on that
+    " tabpage.
+    unlet! t:session_tabsession_name
+    return
+  endif
+  let tabpagenr = tabpagenr()
+  let keys = ['tabpage:' . tabpagenr]
+  let buflist = tabpagebuflist()
+  for winnr in range(1, winnr('$'))
+    " Create a string that describes the state of the window {winnr}.
+    call add(keys, printf('width:%i,height:%i,buffer:%i',
+          \ winwidth(winnr), winheight(winnr), buflist[winnr - 1]))
+  endfor
+  let layout = join(keys, "\n")
+  if layout != get(s:cached_layouts, tabpagenr, '')
+    let s:session_is_dirty = 1
+  endif
+  let s:cached_layouts[tabpagenr] = layout
+endfunction
 
 function! s:serialize_buffer_list()
   if &sessionoptions =~ '\<buffers\>'
@@ -380,6 +455,7 @@ function! xolox#session#open_cmd(name, bang) abort " {{{2
       call s:lock_session(path)
       execute 'source' fnameescape(path)
       let s:session_is_dirty=1
+      call s:set_session_name(name)
       call s:last_session_persist(name)
       call xolox#misc#timer#stop("session.vim %s: Opened %s session in %s.", g:xolox#session#version, string(name), starttime)
       call xolox#misc#msg#info("session.vim %s: Opened %s session from %s.", g:xolox#session#version, string(name), fnamemodify(path, ':~'))
@@ -422,6 +498,7 @@ function! xolox#session#save_cmd(name, bang) abort " {{{2
       let v:this_session = path
       call s:lock_session(path)
       "unlet! s:session_is_dirty
+      call s:set_session_name(name)
     endif
   endif
 endfunction
@@ -455,23 +532,51 @@ function! xolox#session#close_cmd(bang, silent) abort " {{{2
     endif
     call s:unlock_session(xolox#session#name_to_path(name))
   endif
-  " Close al but the current tab page.
-  if tabpagenr('$') > 1
+  " Close all but the current tab page.
+  if &sessionoptions =~ '\<tabpages\>' && tabpagenr('$') > 1
     execute 'tabonly' . a:bang
   endif
+
+  " Locate buffers that are only visible in this tab page.
+  if &sessionoptions !~ '\<tabpages\>' && tabpagenr('$') > 1
+    let buffers_in_other_tabs = []
+    for tab_page in range(1, tabpagenr('$'))
+      if tab_page == tabpagenr()
+        continue	" Skip current tab page.
+      endif
+      call extend(buffers_in_other_tabs, tabpagebuflist(tab_page))
+    endfor
+
+    let buffers_only_here = []
+    for bufnr in tabpagebuflist()
+      if index(buffers_in_other_tabs, bufnr) == -1
+        call add(buffers_only_here, bufnr)
+      endif
+    endfor
+  endif
+
   " Close all but the current window.
   if winnr('$') > 1
     execute 'only' . a:bang
   endif
   " Start editing a new, empty buffer.
   execute 'enew' . a:bang
-  " Close all but the current buffer.
-  let bufnr_keep = bufnr('%')
-  for bufnr in range(1, bufnr('$'))
-    if buflisted(bufnr) && bufnr != bufnr_keep
-      execute 'silent bdelete' bufnr
-    endif
-  endfor
+
+  if exists('buffers_only_here')
+    " Close all buffers that were only visible in this tab page.
+    for bufnr in filter(buffers_only_here, 'v:val != bufnr("")')
+      execute 'silent! bdelete' bufnr
+    endfor
+  else
+    " Close all but the current buffer.
+    let bufnr_keep = bufnr('%')
+    for bufnr in range(1, bufnr('$'))
+      if buflisted(bufnr) && bufnr != bufnr_keep
+        execute 'silent bdelete' bufnr
+      endif
+    endfor
+  endif
+
   " Restore working directory (and NERDTree?) from before :OpenSession.
   if exists('s:oldcwd')
     execute s:oldcwd
@@ -659,6 +764,23 @@ function! s:session_default_name()
     return substitute(getcwd() . '-git' . strpart(head[0], len - 1), '[:\/]', '-', 'g')
   endif
   return ''
+endfunction
+
+" Tab-scoped sessions: {{{2
+
+function! xolox#session#PushTabSessionOptions()
+    let s:save_sessionoptions = &sessionoptions
+
+    " Only persist the current tab page.
+    set sessionoptions-=tabpages
+
+    " Don't persist the size and position of the Vim window.
+    set sessionoptions-=resize
+    set sessionoptions-=winpos
+endfunction
+function! xolox#session#PopTabSessionOptions()
+    let &sessionoptions = s:save_sessionoptions
+    unlet s:save_sessionoptions
 endfunction
 
 " vim: ts=2 sw=2 et
