@@ -1,9 +1,9 @@
 " Vim script
 " Author: Peter Odding
-" Last Change: January 15, 2012
+" Last Change: February 19, 2013
 " URL: http://peterodding.com/code/vim/session/
 
-let g:xolox#session#version = '1.5'
+let g:xolox#session#version = '1.6'
 
 " Public API for session persistence. {{{1
 
@@ -265,7 +265,7 @@ endfunction
 
 function! xolox#session#auto_save() " {{{2
   if !v:dying && g:session_autosave != 'no'
-    let name = s:get_name('', 0)
+    let name = s:get_name('', 1)
     if name != '' && exists('s:session_is_dirty')
       let msg = "Do you want to save your editing session before quitting Vim?"
       if s:prompt(msg, 'g:session_autosave')
@@ -560,7 +560,7 @@ function! s:get_name(name, use_default) " {{{2
       let name = xolox#session#path_to_name(v:this_session)
     endif
   endif
-  return name != '' ? name : a:use_default ? 'default' : ''
+  return name != '' ? name : a:use_default ? s:session_default_name() : ''
 endfunction
 
 function! xolox#session#name_to_path(name) " {{{2
@@ -606,7 +606,7 @@ function! s:last_session_recall()
       return readfile(fname)[0]
     endif
   endif
-  return 'default'
+  return s:session_default_name()
 endfunction
 
 " Lock file management: {{{2
@@ -649,6 +649,16 @@ function! s:session_is_locked(session_path, ...)
       return 1
     endif
   endif
+endfunction
+
+function! s:session_default_name()
+  let git_head = xolox#misc#path#merge('.git', 'HEAD')
+  if filereadable(git_head)
+    let head = readfile(git_head)
+    let len = strlen('ref: refs/heads/')
+    return substitute(getcwd() . '-git' . strpart(head[0], len - 1), '[:\/]', '-', 'g')
+  endif
+  return ''
 endfunction
 
 " vim: ts=2 sw=2 et
